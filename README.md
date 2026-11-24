@@ -1,84 +1,86 @@
-# Monitoring Hub
+# monitoring-hub
 
-A Spring Boot service that unifies four different real-world ways external
-sensor/environmental data shows up in practice into one clean model and one
-API, instead of building a separate stack per source:
+A Spring Boot service that collects sensor readings from four kinds of feed (REST polling, a bulk CSV file, delimited files on FTP, and a binary format on FTP), stores them in one model, and serves them through one API. Version 0.2 adds failover between two feeds that report on the same gauge, a Redis cache in front of the chart endpoints, and a React dashboard.
 
-| Connector | Pattern | Real-world shape |
-|---|---|---|
-| `RestPollingConnector` | REST/JSON polling | Per-sensor time-range GET, with a backfill sweep for anything a slow response caused the live poll to miss |
-| `CsvFeedConnector` | Bulk CSV over HTTP | One wide CSV per fetch: a timestamp column + one value column per station |
-| `DelimitedFtpConnector` | FTP + delimited file | Per-station file dropped on an FTP server, header row + metadata rows + comma-separated readings |
-| `BinaryFeedConnector` | FTP + custom binary format | Hourly-bucketed **GCF** (Guralp Compressed Format) files: diff-encoded, big-endian, block-structured binary time series |
+**Live dashboard:** https://omercanbasboga.github.io/monitoring-hub/ (the feeds are simulated in the browser using the same failover and gap rules as the service)
 
-Every connector writes into the same `Station` / `Reading` tables through one
-shared `StationDataService`, so gap-filling (`GapFiller`) and chart
-downsampling (`ChartDownsampler`, min-max bucketing) are each implemented
-**once** and reused by all four sources — not copy-pasted per source.
+![Dashboard overview](docs/overview.png)
 
-A companion project, [`minmax-lttb-downsampler`](https://github.com/Omercanbasboga/minmax-lttb-downsampler),
-extracts the downsampling idea (plus an LTTB pass) as a standalone,
-framework-free library.
+## Why it exists
 
-## Why this project exists
+I built the original version of this at a university, for a sea-level monitoring system that pulled from several outside networks. That code, its data sources and its servers belong to the university and are not here. This repository is my own rewrite of the same design against a made-up set of gauges, so it can be read in public.
 
-This is a personal, generic reimplementation of an architecture I built for
-a university sea-level/environmental monitoring system during my time there.
-The production system, its data-source names, its infrastructure, and its
-credentials are that institution's property and are **not** reproduced here.
-What you're looking at is the same real engineering — REST/CSV/FTP/binary
-ingestion, unification, gap-filling, downsampling, a DB-backed dynamic
-scheduler — rewritten from scratch against a made-up domain so it can live in
-a public personal portfolio.
+## What's in it
 
-## Highlights worth reading first
+| Part | Where | What it does |
+| --- | --- | --- |
+| Connectors | `ingestion/` | One per feed type. Each is opt-in and does nothing until its URL or host is set. |
+| Shared read/write layer | `service/StationDataService` | Upsert stations, skip readings already stored, fill gaps, downsample for charts. Written once, used by every connector. |
+| Station matches | `match/` | Pair a primary and a backup station for one physical gauge and serve a merged series. |
+| Cache | `cache/` | Read-through Redis cache with a warm-up job. |
+| v2 history | `v2/` | Paged raw readings with limits on page size and range. |
+| Demo feed | `demo/DemoFeed` | Eight gauges with a day of history and some outages, for running without any real feed. |
+| Dashboard | `dashboard/` | React 18, MUI 5, Highcharts. Talks to the service or runs on its own simulation. |
 
-- `ingestion/binary/GcfBinaryParser.java` — from-scratch binary parser for a
-  real compressed sensor format: big-endian block layout, diff-decoding
-  against a running integration constant, bit-packed sampling-rate and
-  timestamp decoding. Covered by a byte-level unit test that hand-builds a
-  block and checks the decoded values and timestamp exactly.
-- `service/ChartDownsampler.java` — min-max bucketing downsampler with a test
-  that asserts a single spike buried in 30,000 points survives being reduced
-  to 300 buckets (the failure mode plain every-Nth-point sampling doesn't
-  protect against).
-- `config/DynamicSchedulingConfig.java` + `DynamicIntervalTrigger.java` +
-  `SchedulerConfigService.java` — each source's polling interval lives in the
-  DB and can be changed at runtime through `PUT /api/scheduler/intervals/{source}`
-  without a restart.
+## Failover
+
+The same gauge often shows up in two networks. A match records which one is primary and which is backup. `FailoverMerger` reads both for the requested window and keeps the primary as it is. Where two primary readings are further apart than one and a half polling intervals, it fills the hole with the backup's readings from inside that hole. Holes at either end of the window count too, and if the primary sent nothing at all the backup serves the whole window. Nothing is stored; the merge happens on read.
+
+A scheduled job (`MatchScanJob`, every minute over the last 15 minutes) does two things for each match. It writes every polling slot that either side missed to `match_gap`, and it records in `source_usage` when the match switched between primary, backup and nothing. The overlap between runs means a skipped run loses nothing, and slots already written are filtered before saving. Gap rows are never rewritten. If data arrives late, the slot was still empty when we looked.
+
+Polling intervals come from the database and can be changed at runtime (`PUT /api/scheduler/intervals/{source}`), and the gap threshold follows them.
+
+![Gauge detail](docs/gauge.png)
+
+## Cache
+
+`CacheService` wraps Redis with two rules. It fails open: if Redis is down or switched off, reads go to the database and writes are dropped, so the cache can make a request faster but never make it fail. Values are plain JSON read back with an explicit type, with no Jackson type ids, so moving a DTO class doesn't break entries already cached.
+
+`CacheWarmup` rewrites every active station's last 24 hours before the key expires instead of evicting it, which avoids a burst of simultaneous misses. Range requests with free start and end times can't be cached under their own keys with any hope of a hit, but most of them fall inside the last day, so `CacheSlice` cuts them out of the warm 24-hour series in memory.
+
+The cache is off by default (`CACHE_ENABLED=false`) so the service starts with nothing else installed.
 
 ## Running it
 
 ```bash
-mvn spring-boot:run
+./mvnw spring-boot:run -Dspring-boot.run.profiles=demo
 ```
 
-Starts on `:8082` against an in-memory H2 database — no setup required.
-Swagger UI: `http://localhost:8082/swagger-ui.html`.
+That starts on `:8082` with an in-memory H2 database and the demo feed. Swagger UI is at `http://localhost:8082/swagger-ui.html`. Without the `demo` profile the service starts empty and waits for connectors to be configured through environment variables (see `application.properties`).
 
-Every connector is **opt-in**: with no configuration, all four simply stay
-idle (no crashes, no exceptions — they no-op when their URL/host is blank).
-Point one at a real feed via environment variables, e.g.:
+With Postgres and Redis:
 
 ```bash
-export CSV_SOURCE_FEED_URL=https://example.org/realtime.csv
-mvn spring-boot:run
+cp .env.example .env    # then set a password
+docker compose up --build
 ```
 
-See `application.properties` for the full list of `connectors.*` settings
-and their corresponding environment variables. The Postgres profile
-(`application-docker.properties`) takes every credential from the
-environment as well — there are no default or example credentials anywhere
-in this repository.
+The dashboard:
+
+```bash
+cd dashboard
+npm install
+VITE_API_URL=http://localhost:8082 npm run dev   # against the service
+npm run dev                                      # on the built-in simulation
+```
+
+Tests: `./mvnw test`. Besides unit tests for the merger, the gap scanner, the cache slice, range checks, the GCF parser and the downsampler, `MatchApiTest` boots the app with the demo feed and checks the match API end to end.
 
 ## API
 
-- `GET /api/unified/stations` — every station across every configured source, with its latest reading
-- `GET /api/unified/stations/{sourceType}` — filtered by `REST_API` / `CSV_FEED` / `FTP_DELIMITED` / `FTP_BINARY`
-- `GET /api/sources/{sourceType}/stations/{externalId}/readings` — raw, gap-filled readings for a time range
-- `GET /api/sources/{sourceType}/stations/{externalId}/readings/chart/last-24h` — gap-filled + downsampled, ready to plot
-- `GET /api/scheduler/intervals`, `PUT /api/scheduler/intervals/{source}` — read/tune polling intervals
+- `GET /api/unified/stations`: every station with its latest reading
+- `GET /api/sources/{sourceType}/stations/{externalId}/readings/chart/last-24h`: gap-filled and downsampled
+- `GET /api/matches`, `POST /api/matches`, `PUT /api/matches/{id}`: station matches (no delete, so history stays attached)
+- `GET /api/matches/{id}/series/last-24h`: merged series, each point tagged `PRIMARY` or `SECONDARY`
+- `GET /api/matches/{id}/gaps`, `GET /api/matches/{id}/usage`: missed slots and source switches
+- `GET /api/v2/sources/{sourceType}/stations/{externalId}/readings?start=&end=&page=&size=`: paged history, newest first, at most 1000 rows a page and 366 days a range
+- `GET /api/scheduler/intervals`, `PUT /api/scheduler/intervals/{source}?intervalMs=`
 
-## Stack
+![Dashboard in dark mode](docs/overview-dark.png)
 
-Java 21, Spring Boot 3.5, Spring Data JPA, H2 (dev) / PostgreSQL (docker profile), springdoc-openapi, Apache Commons Net (FTP), JUnit 5.
+## Notes
+
+- The binary connector reads GCF (Güralp Compressed Format). `GcfBinaryParser` decodes it from the byte layout and has a test that builds a block by hand.
+- `ChartDownsampler` uses min-max bucketing so a single spike survives downsampling. [`minmax-lttb-downsampler`](https://github.com/Omercanbasboga/minmax-lttb-downsampler) is the same idea as a standalone library.
+- The dashboard map is drawn from Natural Earth 1:50m land (public domain), clipped by `dashboard/scripts/build-map.mjs`. Gauge positions are real harbours; every reading is generated.
+- Highcharts is free for personal and non-commercial use. Commercial use of the dashboard needs a Highcharts licence.
