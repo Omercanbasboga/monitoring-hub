@@ -6,3 +6,6 @@ target/
 logs/
 *.log
 .DS_Store
+.env
+dashboard/node_modules/
+dashboard/dist/
