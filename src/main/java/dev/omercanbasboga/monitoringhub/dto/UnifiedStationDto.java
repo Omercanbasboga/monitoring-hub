@@ -1,10 +1,13 @@
 package dev.omercanbasboga.monitoringhub.dto;
 
+import com.fasterxml.jackson.annotation.JsonAutoDetect;
 import dev.omercanbasboga.monitoringhub.model.SourceType;
 import dev.omercanbasboga.monitoringhub.model.Station;
 
 import java.time.Instant;
 
+// fields are read directly so the cached JSON can be turned back into this class
+@JsonAutoDetect(fieldVisibility = JsonAutoDetect.Visibility.ANY)
 public class UnifiedStationDto {
 
     private String id;

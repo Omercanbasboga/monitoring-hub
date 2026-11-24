@@ -5,6 +5,7 @@ import dev.omercanbasboga.monitoringhub.model.SourceType;
 import dev.omercanbasboga.monitoringhub.model.Station;
 import dev.omercanbasboga.monitoringhub.repository.StationRepository;
 import dev.omercanbasboga.monitoringhub.service.StationDataService;
+import dev.omercanbasboga.monitoringhub.v2.RangeRules;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.format.annotation.DateTimeFormat;
@@ -19,8 +20,6 @@ import java.util.List;
 @Tag(name = "Station Readings", description = "Raw and chart-ready (gap-filled + downsampled) readings for one station")
 public class StationDataController {
 
-    private static final long DEFAULT_GAP_THRESHOLD_SECONDS = 90;
-
     private final StationDataService stationDataService;
     private final StationRepository stationRepository;
 
@@ -30,13 +29,14 @@ public class StationDataController {
     }
 
     @GetMapping
-    @Operation(summary = "Raw readings for a time range (gap-filled, not downsampled)")
+    @Operation(summary = "Raw readings for up to 31 days (gap-filled, not downsampled); use /api/v2 for longer history")
     public ResponseEntity<List<ReadingDto>> getRange(
             @PathVariable SourceType sourceType, @PathVariable String externalId,
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant start,
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant end) {
         Station station = requireStation(sourceType, externalId);
-        return ResponseEntity.ok(stationDataService.getReadings(station, start, end, DEFAULT_GAP_THRESHOLD_SECONDS));
+        RangeRules.checkChart(start, end);
+        return ResponseEntity.ok(stationDataService.getReadings(station, start, end));
     }
 
     @GetMapping("/chart/last-24h")
@@ -44,17 +44,18 @@ public class StationDataController {
     public ResponseEntity<List<ReadingDto>> getLast24hForChart(
             @PathVariable SourceType sourceType, @PathVariable String externalId) {
         Station station = requireStation(sourceType, externalId);
-        return ResponseEntity.ok(stationDataService.getLast24HoursForChart(station, DEFAULT_GAP_THRESHOLD_SECONDS));
+        return ResponseEntity.ok(stationDataService.getLast24HoursForChart(station));
     }
 
     @GetMapping("/chart")
-    @Operation(summary = "Arbitrary time range, gap-filled and downsampled for charting")
+    @Operation(summary = "Up to 31 days, gap-filled and downsampled for charting")
     public ResponseEntity<List<ReadingDto>> getRangeForChart(
             @PathVariable SourceType sourceType, @PathVariable String externalId,
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant start,
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant end) {
         Station station = requireStation(sourceType, externalId);
-        return ResponseEntity.ok(stationDataService.getRangeForChart(station, start, end, DEFAULT_GAP_THRESHOLD_SECONDS));
+        RangeRules.checkChart(start, end);
+        return ResponseEntity.ok(stationDataService.getRangeForChart(station, start, end));
     }
 
     private Station requireStation(SourceType sourceType, String externalId) {
