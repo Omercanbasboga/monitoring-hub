@@ -1,5 +1,7 @@
 # monitoring-hub
 
+[![CI](https://github.com/Omercanbasboga/monitoring-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/Omercanbasboga/monitoring-hub/actions/workflows/ci.yml)
+
 A Spring Boot service that collects sensor readings from four kinds of feed (REST polling, a bulk CSV file, delimited files on FTP, and a binary format on FTP), stores them in one model, and serves them through one API. Version 0.2 adds failover between two feeds that report on the same gauge, a Redis cache in front of the chart endpoints, and a React dashboard.
 
 **Live dashboard:** https://omercanbasboga.github.io/monitoring-hub/ (the feeds are simulated in the browser using the same failover and gap rules as the service)
